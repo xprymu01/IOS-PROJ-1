@@ -1,0 +1,225 @@
+#!/bin/sh
+
+# tradelog
+# Řešení IOS-Projekt-1, 3.4.2021
+# Autor: Marek Prymus, xrpymu01@vutbr.cz, FIT
+
+export POSIXLY_CORRECT=yes
+export LC_ALL=C
+
+help(){
+  echo "Usage : tradelog [-h|--help] [FILTR] [PŘÍKAZ] [LOG [LOG2 [...]]]"
+  echo ""
+  echo "PŘÍKAZY"
+  echo ""
+  echo "list-tick – výpis seznamu vyskytujících se burzovních symbolů"
+  echo ""
+  echo "profit – výpis celkového zisku z uzavřených pozic"
+  echo ""
+  echo "pos – výpis hodnot aktuálně držených pozic seřazených sestupně dle hodnoty"
+  echo ""
+  echo "last-price – výpis poslední známé ceny pro každý ticker"
+  echo ""
+  echo "hist-ord – výpis histogramu počtu transakcí dle tickeru"
+  echo ""
+  echo "graph-pos – výpis grafu hodnot držených pozic dle tickeru"
+  echo ""
+  echo "FILTRY"
+  echo ""
+  echo "-a DATETIME – after: jsou uvažovány pouze záznamy PO tomto datu (bez tohoto data)"
+  echo "              DATETIME je formátu YYYY-MM-DD HH:MM:SS"
+  echo ""
+  echo "-b DATETIME – before: jsou uvažovány pouze záznamy PŘED tímto datem (bez tohoto data)"
+  echo ""
+  echo "-t TICKER – jsou uvažovány pouze záznamy odpovídající danému tickeru"
+  echo "            Při více výskytech přepínače se bere množina všech uvedených tickerů"
+  echo ""
+  echo "-w WIDTH – u výpisu grafů nastavuje jejich šířku, tedy délku nejdelšího řádku na WIDTH"
+  echo "           WIDTH musí být kladné celé číslo. Více výskytů přepínače je chybné spuštění."
+  echo ""
+}
+
+COMMANDS=""
+WIDTH=""
+LOG_FILES=""
+GZ_LOG_FILES=""
+AFTER_TIME=""
+BEFORE_TIME="9999-99-99 99:99:99"
+TICKERS=""
+
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+    list-tick | profit | pos | last-price | hist-ord | graph-pos)
+      if [ -n "$COMMANS" ]; then
+          echo "Error : Maximálně lze použít jen 1 příkaz"
+          exit 1
+      fi
+      COMMANDS="$1"
+      shift
+      ;;
+    -h | --help )
+      help
+      exit 0
+      ;;
+    -w)
+      if [ -n "$WIDTH" ]; then
+        echo "Error : Vícekrát použit filtr WIDTH"
+        exit 1
+      fi
+      WIDTH=$2
+      if [ "$WIDTH" -le 0 ]; then
+        echo "Error : Do filtru WIDTH musíte zadat číslo vetší než 0"
+        exit 1
+      fi
+      shift
+      shift
+      ;;
+    -a)
+      AFTER_TIME="$2"
+      shift
+      shift
+      ;;
+    -b)
+      BEFORE_TIME="$2"
+      shift
+      shift
+      ;;
+    -t)
+      if [ -z "$TICKERS" ];then
+        TICKERS="$2"
+      else
+        TICKERS="$TICKERS|$2"
+      fi
+      shift
+      shift
+      ;;
+    *.log)
+      TMP=$(cat "$1")
+      LOG_FILES="${LOG_FILES}${TMP}"
+      shift
+      ;;
+    *.gz)
+      GZ_LOG_FILES=$(gzip -d -c "$1")
+      LOG_FILES="${LOG_FILES}${GZ_LOG_FILES}"
+      shift
+      ;;
+    *)
+      echo "Error : neznámý argument $1"
+      exit 1
+      ;;
+    esac
+done
+
+
+if [ -n "$LOG_FILES" ]; then
+  READ_FILTER=$LOG_FILES
+else
+  READ_FILTER=$(cat -)
+fi
+
+if [ -n "$TICKERS" ];then
+  READ_FILTER=$(echo "$READ_FILTER" | grep -w -E "$TICKERS")
+fi
+
+
+READ_FILTER=$(echo "$READ_FILTER" | awk -F ';' -v a="$AFTER_TIME" '{if($1 > a){print $0}}' | awk -F ';' -v b="$BEFORE_TIME" '{if($1 < b){print $0}}')
+
+if [ "$COMMANDS" = "list-tick" ]; then
+  echo "$READ_FILTER" | awk -F ';' '{print $2}' | sort -u
+elif [ "$COMMANDS" = "profit" ]; then
+  echo "$READ_FILTER" | awk -F ';' '{if($3 == "sell") {profit += $4*$6} else{profit-=$4*$6}} END{printf("%.2f\n",profit)}'
+elif [ "$COMMANDS" = "last-price" ]; then
+  LONGEST_NUM=$(echo "$READ_FILTER" | awk -F ';' '{printf("%10-s:%.2f\n",$2,$4) }' | tac | sort -s -u -n -r -t ':' -k 2,2 | awk -F ':' '{print $2}' | head -n 1)
+  LENGTH_OF_LONGEST=${#LONGEST_NUM}
+  echo "$READ_FILTER" | awk -F ';' -v LoL="$LENGTH_OF_LONGEST" '{printf("%10-s: %*.2f\n",$2,LoL,$4) }' | tac | sort -s -u -t ':' -k 1,1
+elif [ "$COMMANDS" = "pos" ]; then
+  LIST_OF_TICS=$(echo "$READ_FILTER" | awk -F ';' '{print $2}' | sort -u)
+  for i in $LIST_OF_TICS; do
+    LAST_PRICE=$(echo "$READ_FILTER" | awk -F ';' '{printf("%10-s:%.2f\n",$2,$4) }' | tac | sort -s -u -t ':' -k 1,1 | grep -w "$i" | awk -F ':' '{print $2}')
+    TMP=$(echo "$READ_FILTER" | grep -w "$i" | awk -F ';' -v LP="$LAST_PRICE" '{if($3 == "buy") {sum += $6} else{sum-=$6}} END{printf("%10-s: %.2f\n",$2,sum*LP)}')
+    OUT="$TMP\n$OUT"
+  done
+  OUT=$(echo "$OUT" | head -n -1 | sort -s -r -n -t ':' -k 2,2 )
+  LONGEST_NUM=$(echo "$OUT" | awk -F ':' '{print $2}' | head -n 1)
+  LENGTH_OF_LONGEST=${#LONGEST_NUM}
+  LONGEST_NUM1=$(echo "$OUT" | awk -F ':' '{print $2}' | tail -n 1)
+  LENGTH_OF_LONGEST1=${#LONGEST_NUM1}
+  if [ "$LENGTH_OF_LONGEST1" -gt "$LENGTH_OF_LONGEST" ]; then
+    LENGTH_OF_LONGEST="$LENGTH_OF_LONGEST1"
+  fi
+  echo "$OUT" | awk -F ':' -v LoL="$LENGTH_OF_LONGEST" '{printf("%7-s: %*.2f\n",$1,LoL-1,$2)}'
+elif [ "$COMMANDS" = "hist-ord" ]; then
+  if [ -z "$WIDTH" ];then
+    LIST_OF_TICS=$(echo "$READ_FILTER" | awk -F ';' '{print $2}' | sort -u)
+    for i in $LIST_OF_TICS; do
+      NUM=$(echo "$READ_FILTER" | grep -c -w "$i" )
+      printf "%-10s: " "$i"
+      for j in $(seq 1 "$NUM");do
+        printf "#"
+      done
+      echo ""
+    done
+  else
+    LIST_OF_TICS=$(echo "$READ_FILTER" | awk -F ';' '{print $2}' | sort -u)
+    I=$(echo "$LIST_OF_TICS" | head -n 1)
+    MAX=$(echo "$READ_FILTER" | grep -c -w "$I")
+    for i in $LIST_OF_TICS; do
+      TMP=$(echo "$READ_FILTER" | grep -c -w "$i" )
+      if [ "$MAX" -lt "$TMP" ]; then
+          MAX="$TMP"
+      fi
+    done
+    NUM_FOR=$(echo "$MAX" | awk -v w="$WIDTH" '{printf("%.2f",$1/w)}')
+    for i in $LIST_OF_TICS; do
+      NUM=$(echo "$READ_FILTER" | grep -c -w "$i" )
+      CURR_HIST=$(echo "$NUM" | awk -v n="$NUM_FOR" '{printf("%d",$1/n)}' )
+      printf "%-10s: " "$i"
+      for j in $(seq 1 "$CURR_HIST");do
+        printf "#"
+      done
+      echo ""
+    done
+  fi
+
+elif [ "$COMMANDS" = "graph-pos" ]; then
+  if [ -z "$WIDTH" ];then
+    WIDTH=1000
+  fi
+  LIST_OF_TICS=$(echo "$READ_FILTER" | awk -F ';' '{print $2}' | sort -u)
+  for i in $LIST_OF_TICS; do
+    LAST_PRICE=$(echo "$READ_FILTER" | awk -F ';' '{printf("%10-s:%.2f\n",$2,$4) }' | tac | sort -s -u -t ':' -k 1,1 | grep -w "$i" | awk -F ':' '{print $2}')
+    TMP=$(echo "$READ_FILTER" | grep -w "$i" | awk -F ';' -v LP="$LAST_PRICE" '{if($3 == "buy") {profit += $6} else{profit-=$6}} END{printf("%10-s:%.2f\n",$2,profit*LP)}')
+    OUT="$TMP\n$OUT"
+  done
+  OUT=$(echo "$OUT" | head -n -1 | sort -s -r -n -t ':' -k 2,2 )
+  BIGGEST_NUM=$(echo "$OUT" | awk -F ':' '{printf("%d\n",$2)}' | head -n 1)
+  BIGGEST_NUM1=$(echo "$OUT" | awk -F ':' '{printf("%d\n",$2*-1)}' | tail -n 1)
+  BIGGEST="$BIGGEST_NUM"
+  if [ "$BIGGEST_NUM1" -gt "$BIGGEST_NUM" ]; then
+    BIGGEST="$BIGGEST_NUM1"
+  fi
+  NUM_FOR=$(echo "$BIGGEST" | awk -v w="$WIDTH" '{printf("%.2f",$1/w)}')
+  for i in $LIST_OF_TICS; do
+    MINUS=false
+    CURR_POS=$(echo "$OUT" | grep -w "$i" | awk -F ':' -v n="$NUM_FOR" '{printf("%d",($2/n))}')
+    if [ "$CURR_POS" -lt 0 ]; then
+      MINUS=true
+      CURR_POS=$((CURR_POS*-1))
+    fi
+    printf "%-10s:" "$i"
+    if [ "$CURR_POS" -ne 0 ]; then
+    	printf " "
+    fi
+    for j in $(seq 1 "$CURR_POS"); do
+      if [ "$MINUS" = false ];then
+        printf "#"
+      else
+        printf '!'
+      fi
+    done
+    echo ""
+  done
+else
+  echo "$READ_FILTER"
+fi
